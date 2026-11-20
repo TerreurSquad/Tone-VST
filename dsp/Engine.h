@@ -3,6 +3,7 @@
 #include "Modulators.h"
 #include "Random.h"
 #include "SampleView.h"
+#include "StepSequencer.h"
 
 #include <atomic>
 #include <cstdint>
@@ -45,6 +46,7 @@ struct EngineParams
     double gate { 1.0 };
     int voices { 8 };
     double jitter { 0.0 };
+    HitEnvelope hitEnvelope;
     // Sample
     int slice { 0 };
     double scan { 0.0 };
@@ -56,12 +58,18 @@ struct EngineParams
     double sFine { 0.0 };
     double penvAmt { 0.0 };
     double penvDecayMs { 50.0 };
-    // A/B (M3)
+    // Cycling
     int abMode { 0 };
     int abSlice { 1 };
-    double abPitch { 0.0 };
+    double abPitch { 0.0 };     // additional semitone offset for B
     double abGainDb { 0.0 };
-    // Ramp (M4)
+    double abScan { 0.0 }, abLength { 1.0 };
+    bool abReverse { false };
+    int abInterp { 0 };
+    bool abMono { true };
+    double abSamplePitch { 0.0 }, abFine { 0.0 };
+    double abPenvAmt { 0.0 }, abPenvDecayMs { 50.0 };
+    // Ramp
     bool rampOn { false };
     double rampStart { -2.0 };
     double rampEnd { 0.0 };
@@ -69,7 +77,7 @@ struct EngineParams
     double rampCurve { 0.0 };
     int rampLoop { 0 };
     bool rampLegato { false };
-    // LFOs (M4)
+    // LFOs
     struct Lfo
     {
         int shape { 0 };
@@ -89,10 +97,11 @@ struct EngineParams
     double uniDetune { 10.0 };  // cents
     double uniSpread { 0.5 };
     bool uniPhase { true };
-    // Sequencer (M5)
+    // Sequencer
     bool seqOn { false };
     int seqLen { 16 };
     bool seqReset { true };
+    Sequence steps;
     // Envelope
     double envA { 0.0 }, envD { 100.0 }, envS { 1.0 }, envR { 5.0 };
     // Output
@@ -123,10 +132,15 @@ struct HostInfo
 struct Telemetry
 {
     std::atomic<float> rateHz { 0.0f };
+    std::atomic<float> rampBaseHz { 0.0f };
     std::atomic<int> slice { 0 };
     std::atomic<int> numSlices { 1 };
     std::atomic<int> step { -1 };
+    std::atomic<float> envelopeLevel { 0.0f };
+    std::atomic<Adsr::Stage> envelopeStage { Adsr::Stage::Idle };
     std::atomic<float> playPos { -1.0f }; // fraction of the sample, -1 = none
+    std::atomic<float> auditionPos { -1.0f };
+    std::atomic<int> auditionSlice { -1 };
     std::atomic<bool> active { false };
     std::atomic<int> voices { 0 };
 };
@@ -144,13 +158,14 @@ public:
     void setEngineRate (double fsE) noexcept;
     double getEngineRate() const noexcept { return fsE; }
 
-    /// Swap the sample source. Real-time safe. All voices are stopped, the old
-    /// source is never touched again after this call.
-    void setSource (const SourceView& src) noexcept;
+    /// Swap the sample source without retaining the old view. Keep voices only
+    /// when the source audio and slice boundaries are identical.
+    void setSource (const SourceView& src, bool keepVoices = false) noexcept;
 
     void setParams (const EngineParams& p) noexcept { params = p; paramsDirty = true; }
     const EngineParams& getParams() const noexcept { return params; }
     void setHostInfo (const HostInfo& h) noexcept;
+    void auditionSlice (int index, bool useB = false) noexcept;
 
     /// Renders n samples (overwrites l / r). Events must be sorted by offset.
     void process (float* l, float* r, int n, const MidiEvent* events, int numEvents) noexcept;
@@ -177,10 +192,15 @@ private:
     void noteOff (int note) noexcept;
     void removeNote (int note) noexcept;
     void afterRelease (int releasedNote) noexcept;
-    void startNewNote (bool legato) noexcept;
     void updateSnapOffset() noexcept;
     void configureLanes() noexcept;
-    void fireHit (int laneIndex, double subOffset, double periodSamples) noexcept;
+    void fireHit (int laneIndex, double subOffset, double periodSamples, double scanMod, double gateMod,
+                  double pitchA, double pitchB) noexcept;
+    HitStart makeHit (int slice, bool useB, double scanMod = 0.0) const noexcept;
+    void advanceLfos (double samples, double clockIncrement) noexcept;
+    void syncLfosToHit() noexcept;
+    double modulation (double EngineParams::Lfo::* depth) const noexcept;
+    bool nextHitUsesB (int laneIndex) noexcept;
     int currentSlice() const noexcept;
     double noteRef() const noexcept;
 
@@ -205,20 +225,35 @@ private:
     double paramStTarget { 0.0 };
     double srcHz { 1.0 };
     double snapOffset { 0.0 };
-    OnePole paramSm, bendSm, sPitchSm, velSm, driveSm, outSm;
+    OnePole paramSm, bendSm, sPitchSm, bPitchSm, velSm, driveSm, outSm;
     double glideNote { 60.0 };
     double glideCoef { 1.0 };
-    double lastRateHz { 0.0 };
+    double lastRateHz { 0.0 }, lastRampBaseSt { 0.0 };
 
+    Ramp ramp;
+    struct LfoState
+    {
+        Lfo oscillator;
+        double increment = 0.0;
+        int sync = -1, ratioHits = 1, ticks = 0;
+    } lfos[2];
     Adsr adsr;
     bool running { false };
 
     Lane lanes[kMaxLanes];
+    StepSequencer sequencers[kMaxLanes];
+    bool sequenceEnabled = false;
     int numLanes { 1 };
     double laneGain { 1.0 };
     int configuredLanes { -1 };
     double configuredDetune { -1.0 }, configuredSpread { -1.0 };
     Random rng { 0xC0FFEEull };
+    Random cyclingRandom { 0xB7C13ull };
+    unsigned cyclingTicks[kMaxLanes] {};
+    int cyclingMode { 0 };
+    double cyclingPitchRatio { 1.0 };
+    float cyclingGain { 1.0f };
+    HitVoice audition;
 
     // host
     HostInfo host;

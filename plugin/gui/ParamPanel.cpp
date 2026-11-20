@@ -1,95 +1,158 @@
 #include "ParamPanel.h"
 
+#include "HammerLookAndFeel.h"
+#include "ModulationPanels.h"
+#include "ParameterControl.h"
+#include "../PluginProcessor.h"
+
+#include <cmath>
+#include <initializer_list>
+#include <utility>
+
 using namespace juce;
 
 namespace
 {
-using APVTS = AudioProcessorValueTreeState;
-
-/// Label + matching control + attachment for one parameter.
-class ParamControl : public Component
+class GroupPage : public Component, private Timer
 {
 public:
-    ParamControl (RangedAudioParameter& p, APVTS& state)
-    {
-        label.setText (p.getName (64), dontSendNotification);
-        label.setJustificationType (Justification::centred);
-        label.setFont (FontOptions (13.0f));
-        addAndMakeVisible (label);
+    explicit GroupPage (XtoneProcessor& p) : processor (p) {}
 
-        const String id = p.getParameterID();
-        if (auto* choice = dynamic_cast<AudioParameterChoice*> (&p))
-        {
-            combo = std::make_unique<ComboBox>();
-            combo->addItemList (choice->choices, 1);
-            addAndMakeVisible (*combo);
-            comboAtt = std::make_unique<APVTS::ComboBoxAttachment> (state, id, *combo);
-        }
-        else if (dynamic_cast<AudioParameterBool*> (&p) != nullptr)
-        {
-            toggle = std::make_unique<ToggleButton> ("an");
-            addAndMakeVisible (*toggle);
-            buttonAtt = std::make_unique<APVTS::ButtonAttachment> (state, id, *toggle);
-        }
-        else
-        {
-            slider = std::make_unique<Slider> (Slider::RotaryHorizontalVerticalDrag, Slider::TextBoxBelow);
-            slider->setTextBoxStyle (Slider::TextBoxBelow, false, 110, 18);
-            slider->setPopupDisplayEnabled (false, false, nullptr);
-            addAndMakeVisible (*slider);
-            sliderAtt = std::make_unique<APVTS::SliderAttachment> (state, id, *slider);
-            slider->setDoubleClickReturnValue (true, (double) p.convertFrom0to1 (p.getDefaultValue()));
-            slider->setTooltip (p.getName (128));
-        }
+    void addSection (String title, std::initializer_list<const char*> ids)
+    {
+        auto& section = addSection (std::move (title));
+        for (const auto* id : ids) addControl (section, *processor.apvts.getParameter (id));
     }
 
-    void resized() override
+    void addGroup (const char* id, String title = {})
     {
-        auto r = getLocalBounds().reduced (4);
-        label.setBounds (r.removeFromTop (30));
-        if (slider) slider->setBounds (r);
-        if (combo) combo->setBounds (r.withSizeKeepingCentre (r.getWidth(), 24));
-        if (toggle) toggle->setBounds (r.withSizeKeepingCentre (60, 24));
+        auto& section = addSection (std::move (title));
+        for (const auto* group : processor.getParameterTree().getSubgroups (false))
+            if (group->getID() == id)
+                for (auto* p : group->getParameters (true))
+                    if (auto* parameter = dynamic_cast<RangedAudioParameter*> (p)) addControl (section, *parameter);
     }
 
-private:
-    Label label;
-    std::unique_ptr<Slider> slider;
-    std::unique_ptr<ComboBox> combo;
-    std::unique_ptr<ToggleButton> toggle;
-    std::unique_ptr<APVTS::SliderAttachment> sliderAtt;
-    std::unique_ptr<APVTS::ComboBoxAttachment> comboAtt;
-    std::unique_ptr<APVTS::ButtonAttachment> buttonAtt;
-};
-
-class GroupPage : public Component
-{
-public:
-    GroupPage (const AudioProcessorParameterGroup& g, APVTS& state)
+    void addRampReadout()
     {
-        for (auto* p : g.getParameters (true))
-            if (auto* rp = dynamic_cast<RangedAudioParameter*> (p))
-                addAndMakeVisible (controls.add (new ParamControl (*rp, state)));
+        rampReadout.setFont (hammer::mono (13.0f));
+        rampReadout.setTooltip ("Ramp endpoints in BPM equivalent, before LFOs and final rate snapping.");
+        addAndMakeVisible (rampReadout);
+        startTimerHz (30);
+    }
+
+    void lookAndFeelChanged() override
+    {
+        const auto& colours = hammer::panelColours (*this);
+        rampReadout.setColour (Label::textColourId, colours.text);
+        for (auto* section : sections)
+            section->heading.setColour (Label::textColourId, colours.muted);
     }
 
     void layoutFor (int width)
     {
-        const int cw = 120, ch = 120;
-        const int cols = jmax (1, width / cw);
-        const int rows = (controls.size() + cols - 1) / cols;
-        setSize (width, jmax (ch, rows * ch));
-        for (int i = 0; i < controls.size(); ++i)
-            controls[i]->setBounds ((i % cols) * cw, (i / cols) * ch, cw, ch);
+        int y = 0;
+        for (auto* section : sections)
+        {
+            if (section->heading.isVisible())
+            {
+                section->heading.setBounds (4, y, width - 8, 20);
+                y += 21;
+            }
+            const auto& controls = section->controls;
+            for (int i = 0; i < controls.size(); i += 2)
+            {
+                auto* first = controls[i];
+                auto* second = controls[i + 1];
+                const int firstWidth = second != nullptr ? width / 2 : width;
+                const int height = jmax (first->preferredHeight(), second != nullptr ? second->preferredHeight() : 0);
+                first->setBounds (0, y + (height - first->preferredHeight()) / 2, firstWidth, first->preferredHeight());
+                if (second != nullptr)
+                    second->setBounds (firstWidth, y + (height - second->preferredHeight()) / 2, width - firstWidth, second->preferredHeight());
+                y += height + 3;
+            }
+            y += 7;
+        }
+        if (rampReadout.getParentComponent() != nullptr)
+        {
+            rampReadout.setBounds (3, y, width - 6, 26);
+            y += 26;
+        }
+        setSize (width, y);
     }
 
 private:
-    OwnedArray<ParamControl> controls;
+    struct Section
+    {
+        Label heading;
+        OwnedArray<ParameterControl> controls;
+    };
+
+    Section& addSection (String title)
+    {
+        auto* section = sections.add (new Section);
+        if (title.isNotEmpty())
+        {
+            section->heading.setText (title, dontSendNotification);
+            section->heading.setFont (hammer::mono (11.0f, Font::bold));
+            section->heading.setBorderSize (BorderSize<int> (0));
+            addAndMakeVisible (section->heading);
+        }
+        return *section;
+    }
+
+    void addControl (Section& section, RangedAudioParameter& parameter)
+    {
+        const auto id = parameter.getParameterID();
+        using Style = ParameterControl::Style;
+        const bool slice = id == "slice" || id == "ab_slice";
+        const bool knob = id == "transpose" || id == "fine" || id == "s_pitch" || id == "penv_amt"
+                       || id == "ab_sample_pitch" || id == "ab_penv_amt";
+        const auto style = slice ? Style::slice : knob ? Style::knob : Style::bar;
+        auto* control = section.controls.add (new ParameterControl (parameter, processor.apvts, {}, true, style));
+        addAndMakeVisible (*control);
+        if (slice)
+        {
+            sliceControls.add (control);
+            updateSliceCounts();
+            if (! isTimerRunning()) startTimerHz (30);
+        }
+    }
+
+    void timerCallback() override
+    {
+        if (! sliceControls.isEmpty() && assetVersion != processor.getAssetVersion()) updateSliceCounts();
+        if (rampReadout.getParentComponent() != nullptr && isShowing())
+        {
+            const auto raw = [this] (const char* id) { return processor.apvts.getRawParameterValue (id)->load(); };
+            const double base = processor.telemetry().rampBaseHz.load();
+            const auto endpoint = [&] (const char* id)
+            {
+                return String (60.0 * base * std::exp2 ((double) raw (id)), 1);
+            };
+            rampReadout.setText (base > 0.0 ? endpoint ("ramp_start") + String::fromUTF8 (" → ") + endpoint ("ramp_end") + " BPM eq."
+                                           : String::fromUTF8 ("Ramp endpoints · BPM eq."), dontSendNotification);
+        }
+    }
+
+    void updateSliceCounts()
+    {
+        assetVersion = processor.getAssetVersion();
+        const auto asset = processor.getCurrentAsset();
+        for (auto* control : sliceControls) control->setSliceCount (asset != nullptr ? asset->slices.numSlices() : 1);
+    }
+
+    XtoneProcessor& processor;
+    Label rampReadout;
+    OwnedArray<Section> sections;
+    Array<ParameterControl*> sliceControls;
+    int assetVersion = -1;
 };
 
 class ScrollingPage : public Component
 {
 public:
-    ScrollingPage (const AudioProcessorParameterGroup& g, APVTS& state) : page (g, state)
+    explicit ScrollingPage (XtoneProcessor& p) : page (p)
     {
         view.setViewedComponent (&page, false);
         view.setScrollBarsShown (true, false);
@@ -101,18 +164,70 @@ public:
         page.layoutFor (getWidth() - view.getScrollBarThickness());
     }
 
-private:
     GroupPage page;
+
+private:
     Viewport view;
 };
 } // namespace
 
-ParamPanel::ParamPanel (AudioProcessor& p, APVTS& state)
+ParamPanel::ParamPanel (XtoneProcessor& p)
 {
-    const auto bg = getLookAndFeel().findColour (ResizableWindow::backgroundColourId);
-    for (auto* g : p.getParameterTree().getSubgroups (false))
-        tabs.addTab (g->getName(), bg, new ScrollingPage (*g, state), true);
-    addAndMakeVisible (tabs);
+    const auto addPage = [this] (const char* name, std::unique_ptr<Component> page)
+    {
+        pageNames.add (name);
+        addChildComponent (pages.add (page.release()));
+    };
+
+    auto pitch = std::make_unique<ScrollingPage> (p);
+    pitch->page.addSection ("MIDI & TUNING", { "midi_mode", "key_mode", "key_root", "slice_base", "transpose", "fine",
+                                               "a4_ref", "pb_range", "glide", "glide_legato", "phase_reset", "vel_sens" });
+    pitch->page.addGroup ("snap", "TUNE SNAP");
+    addPage ("Pitch", std::move (pitch));
+
+    auto trigger = std::make_unique<ScrollingPage> (p);
+    trigger->page.addGroup ("retrigger", "RETRIGGER");
+    trigger->page.addGroup ("hit_envelope", "TRIGGER ADSR");
+    trigger->page.addGroup ("unison", "UNISON");
+    addPage ("Trigger", std::move (trigger));
+
+    auto sample = std::make_unique<ScrollingPage> (p);
+    sample->page.addSection ("PLAYBACK", { "slice", "interp", "scan", "length", "reverse", "mono" });
+    sample->page.addSection ("SAMPLE PITCH", { "s_pitch", "penv_amt", "s_fine", "penv_decay" });
+    addPage ("Sample", std::move (sample));
+
+    auto cycling = std::make_unique<ScrollingPage> (p);
+    cycling->page.addSection ({}, { "ab_mode", "ab_slice" });
+    cycling->page.addSection ("PLAYBACK B", { "ab_scan", "ab_length", "ab_reverse", "ab_mono", "ab_interp", "ab_gain" });
+    cycling->page.addSection ("PITCH B", { "ab_sample_pitch", "ab_penv_amt", "ab_fine", "ab_penv_decay", "ab_pitch" });
+    addPage ("Cycling", std::move (cycling));
+
+    auto motion = std::make_unique<ScrollingPage> (p);
+    motion->page.addGroup ("ramp", "RAMP");
+    motion->page.addRampReadout();
+    addPage ("Motion", std::move (motion));
+    addPage ("LFO 1", hammer::makeLfoPanel (p.apvts, "lfo1"));
+    addPage ("LFO 2", hammer::makeLfoPanel (p.apvts, "lfo2"));
+    addPage ("Amp", hammer::makeAmpPanel (p));
 }
 
-void ParamPanel::resized() { tabs.setBounds (getLocalBounds()); }
+void ParamPanel::showGroup (int index)
+{
+    const int next = index - 1;
+    if (next == selected) return;
+    if (auto* current = pages[selected]) current->setVisible (false);
+    selected = next;
+    if (auto* page = pages[selected]) page->setVisible (true);
+    resized();
+}
+
+void ParamPanel::paint (Graphics& g)
+{
+    hammer::drawRecess (g, getLocalBounds().toFloat(), hammer::skinFor (*this));
+}
+
+void ParamPanel::resized()
+{
+    if (auto* page = pages[selected])
+        page->setBounds (getLocalBounds().reduced (8));
+}

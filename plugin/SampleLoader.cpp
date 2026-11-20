@@ -68,12 +68,12 @@ namespace
         std::unique_ptr<AudioFormatReader> reader (fm.createReaderFor (std::move (in)));
         if (reader == nullptr)
         {
-            error = "Format nicht unterstuetzt";
+            error = "Unsupported audio format";
             return nullptr;
         }
         if (reader->lengthInSamples <= 0)
         {
-            error = "Datei ist leer";
+            error = "Audio file is empty";
             return nullptr;
         }
         const int64 frames = std::min (reader->lengthInSamples, kMaxFrames);
@@ -81,7 +81,7 @@ namespace
         AudioBuffer<float> tmp (numCh, (int) frames);
         if (! reader->read (&tmp, 0, (int) frames, 0, true, numCh >= 2))
         {
-            error = "Lesefehler";
+            error = "Could not decode audio";
             return nullptr;
         }
         return finish (makeAudio (tmp, numCh, reader->sampleRate));
@@ -100,10 +100,11 @@ xt::SourceView SampleAsset::view() const noexcept
     v.sample.sampleRate = audio->sampleRate;
     v.bounds = bounds.data();
     v.numSlices = (int) bounds.size() - 1;
+    v.envelopes = slices.getEnvelopes().data();
     return v;
 }
 
-SampleAsset::Ptr SampleAsset::withMarkers (std::vector<int64_t> markers) const
+SampleAsset::Ptr SampleAsset::withSlices (xt::SliceModel next) const
 {
     SampleAsset::Ptr a = new SampleAsset();
     a->audio = audio;
@@ -114,8 +115,7 @@ SampleAsset::Ptr SampleAsset::withMarkers (std::vector<int64_t> markers) const
     a->isDefault = isDefault;
     a->normalized = normalized;
     a->cachedSampleTree = cachedSampleTree; // audio unchanged -> same SAMPLE node
-    a->slices.setLength (audio ? audio->frames() : 0);
-    a->slices.setMarkers (std::move (markers));
+    a->slices = std::move (next);
     a->bounds = a->slices.bounds();
     return a;
 }
@@ -147,6 +147,19 @@ ValueTree SampleAsset::getSlicesTree() const
     const auto& m = slices.getMarkers();
     MemoryBlock mb (m.data(), m.size() * sizeof (int64_t));
     t.setProperty ("markers", var (mb), nullptr);
+    for (int i = 0; i < slices.numSlices(); ++i)
+    {
+        if (const auto& env = slices.getEnvelopes()[(size_t) i]; env.has_value())
+        {
+            ValueTree entry ("ADSR");
+            entry.setProperty ("start", (int64) bounds[(size_t) i], nullptr);
+            entry.setProperty ("attack", env->attackMs, nullptr);
+            entry.setProperty ("decay", env->decayMs, nullptr);
+            entry.setProperty ("sustain", env->sustain, nullptr);
+            entry.setProperty ("release", env->releaseMs, nullptr);
+            t.appendChild (entry, nullptr);
+        }
+    }
     return t;
 }
 
@@ -158,7 +171,7 @@ namespace loader
         AudioBuffer<float> tmp (1, (int) kick.size());
         tmp.copyFrom (0, 0, kick.data(), (int) kick.size());
         auto a = finish (makeAudio (tmp, 1, 48000.0));
-        a->name = "Default-Kick";
+        a->name = "Default Kick";
         a->isDefault = true;
         return a;
     }
@@ -177,7 +190,7 @@ namespace loader
     {
         if (! f.existsAsFile())
         {
-            error = "Datei nicht gefunden: " + f.getFullPathName();
+            error = "File not found: " + f.getFullPathName();
             return nullptr;
         }
         if ((size_t) f.getSize() <= SampleAsset::kMaxEmbedBytes)
@@ -185,7 +198,7 @@ namespace loader
             auto bytes = std::make_shared<MemoryBlock>();
             if (! f.loadFileAsData (*bytes))
             {
-                error = "Datei kann nicht gelesen werden";
+                error = "Could not read file";
                 return nullptr;
             }
             return fromMemory (bytes, f.getFileName(), f.getFullPathName(), error);
@@ -215,7 +228,7 @@ namespace loader
         else if (path.isNotEmpty())
         {
             a = fromFile (File (path), error);
-            if (a == nullptr) error = "Sample fehlt: " + path;
+            if (a == nullptr) error = "Missing sample: " + path;
         }
         if (a == nullptr) return nullptr;
         if ((bool) t.getProperty ("normalized", false)) a = normalizedCopy (*a);
@@ -234,7 +247,7 @@ namespace loader
         a->origPath = src.origPath;
         a->isDefault = src.isDefault;
         a->normalized = true;
-        a->slices.setMarkers (src.slices.getMarkers());
+        a->slices = src.slices;
         a->bounds = a->slices.bounds();
         return a;
     }

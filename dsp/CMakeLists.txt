@@ -3,6 +3,7 @@ add_library(xtone_dsp STATIC
     HitVoice.cpp
     Lane.cpp
     SliceModel.cpp
+    OnsetDetector.cpp
     DefaultKick.cpp
     Engine.cpp)
 target_include_directories(xtone_dsp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

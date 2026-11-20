@@ -1,0 +1,63 @@
+name: macOS Universal
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - name: Configure
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: '3'
+        run: cmake --preset macos-universal
+      - name: Build
+        run: cmake --build --preset macos-universal --parallel 3
+      - name: DSP tests
+        run: ctest --preset macos-universal
+      - name: Check universal bundles
+        working-directory: build-macos-universal/Xtone_artefacts/Release
+        run: |
+          for bundle in AU/XTONE.component VST3/XTONE.vst3 Standalone/XTONE.app; do
+            lipo "$bundle/Contents/MacOS/XTONE" -verify_arch arm64 x86_64
+            codesign --verify --strict --all-architectures "$bundle"
+          done
+      - name: Validate Audio Unit
+        shell: bash
+        run: |
+          components_dir="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$components_dir"
+          ditto build-macos-universal/Xtone_artefacts/Release/AU/XTONE.component "$components_dir/XTONE.component"
+          # Refresh the registrar on the disposable runner after installing the AU.
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          log="$RUNNER_TEMP/xtone-auval.log"
+          for attempt in 1 2 3; do
+            if auval -strict -v aumu Xtn1 Xtdv | tee "$log"; then
+              grep -Fq 'AU VALIDATION SUCCEEDED.' "$log"
+              exit 0
+            fi
+            if [[ "$attempt" == 3 ]] || ! grep -Fq "didn't find the component" "$log"; then
+              exit 1
+            fi
+            sleep 2
+          done
+      - name: Validate VST3
+        env:
+          PLUGINVAL_VERSION: v1.0.4
+        run: |
+          curl --fail --location --retry 3 \
+            "https://github.com/Tracktion/pluginval/releases/download/$PLUGINVAL_VERSION/pluginval_macOS.zip" \
+            --output "$RUNNER_TEMP/pluginval.zip"
+          ditto -x -k "$RUNNER_TEMP/pluginval.zip" "$RUNNER_TEMP/pluginval"
+          "$RUNNER_TEMP/pluginval/pluginval.app/Contents/MacOS/pluginval" \
+            --strictness-level 5 --skip-gui-tests --validate-in-process \
+            "$PWD/build-macos-universal/Xtone_artefacts/Release/VST3/XTONE.vst3"

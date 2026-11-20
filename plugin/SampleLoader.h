@@ -7,6 +7,8 @@
 
 #include <memory>
 
+class XtoneProcessor;
+
 namespace xtp
 {
 /// Decoded audio: channel 0 = L, 1 = R (copy of L for mono), 2 = mono mix.
@@ -18,7 +20,7 @@ struct AudioData
     int64_t frames() const noexcept { return buffer.getNumSamples(); }
 };
 
-/// Immutable sample + slices as handed to the audio thread. Marker edits create
+/// Immutable sample + slices as handed to the audio thread. Slice edits create
 /// a new asset sharing the audio data (copy-on-write).
 class SampleAsset : public juce::ReferenceCountedObject
 {
@@ -40,14 +42,16 @@ public:
 
     xt::SourceView view() const noexcept;
 
-    /// Same audio, new markers.
-    Ptr withMarkers (std::vector<int64_t> markers) const;
+    /// Same audio, new slice markers or envelopes.
+    Ptr withSlices (xt::SliceModel next) const;
 
     /// SAMPLE + SLICES child trees for the plugin state (built once and cached).
     juce::ValueTree getSampleTree() const;
     juce::ValueTree getSlicesTree() const;
 
 private:
+    friend class ::XtoneProcessor;
+    uint32_t publicationId = 0;
     mutable juce::ValueTree cachedSampleTree;
 };
 

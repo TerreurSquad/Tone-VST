@@ -5,8 +5,10 @@
 
 namespace xtp
 {
+inline constexpr const char* triggerEnvelopeIds[] { "hit_attack", "hit_decay", "hit_sustain", "hit_release" };
+
 /// Parameter layout. IDs are STABLE - never rename or remove after the first release,
-/// only append new ones (version hint 1).
+/// only append new ones with a higher version hint.
 juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
 /// Raw atomics of all parameters, resolved once; fills the engine snapshot per chunk.
@@ -27,8 +29,10 @@ private:
         *pbRange, *phaseReset, *velSens;
     std::atomic<float>*snapMode, *snapScale, *snapRoot;
     std::atomic<float>*trigMode, *declick, *gate, *voices, *jitter;
+    std::atomic<float>*hitAttack, *hitDecay, *hitSustain, *hitRelease;
     std::atomic<float>*slice, *scan, *length, *reverse, *interp, *mono, *sPitch, *sFine, *penvAmt, *penvDecay;
     std::atomic<float>*abMode, *abSlice, *abPitch, *abGain;
+    std::atomic<float>*abScan, *abLength, *abReverse, *abInterp, *abMono, *abSamplePitch, *abFine, *abPenvAmt, *abPenvDecay;
     std::atomic<float>*rampOn, *rampStart, *rampEnd, *rampTime, *rampCurve, *rampLoop, *rampLegato;
     Lfo lfo[2];
     std::atomic<float>*uniVoices, *uniDetune, *uniSpread, *uniPhase;
@@ -37,6 +41,4 @@ private:
     std::atomic<float>*os, *drive, *clip, *outGain;
 };
 
-/// Parameter group names in display order (= GUI tabs).
-juce::StringArray groupOrder();
 } // namespace xtp

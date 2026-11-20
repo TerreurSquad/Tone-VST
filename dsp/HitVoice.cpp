@@ -12,28 +12,57 @@ void HitVoice::start (const HitStart& h, uint64_t newStamp) noexcept
     active = p.winEnd > p.winStart;
     fadingOut = false;
     fadeOutT = fadeOutLen = 0.0;
+    fadeOutGain = 1.0;
+    gatedAt = -1.0;
     t = p.subOffset;
     stamp = newStamp;
     penv = p.penvAmtSt;
     if (p.penvAmtSt != 0.0 && p.subOffset > 0.0)
         penv *= std::pow (p.penvCoef, p.subOffset);
     const double penvMul = p.penvAmtSt != 0.0 ? std::exp2 (penv / 12.0) : 1.0;
-    // pitch modulation for the fractional start is approximated by the start speed
-    const double travel = p.subOffset * p.speedRatio * penvMul;
+    const double travel = p.subOffset * p.speedRatio * p.startPitchRatio * penvMul;
     pos = p.reverse ? p.winEnd - travel : p.winStart + travel;
 }
 
 void HitVoice::release (double n) noexcept
 {
-    if (! active || fadingOut) return;
+    if (! active) return;
     if (n <= 0.0)
     {
-        active = false;
+        kill();
         return;
     }
+    if (fadingOut && n >= fadeOutLen - fadeOutT) return;
+    fadeOutGain = fadingOut ? releaseGain() : 1.0;
     fadingOut = true;
     fadeOutT = 0.0;
     fadeOutLen = n;
+}
+
+double HitVoice::releaseGain() const noexcept
+{
+    return fadeOutGain * (0.5 + 0.5 * std::cos (kPi * std::min (1.0, fadeOutT / fadeOutLen)));
+}
+
+void HitVoice::gateOff (double declickSamples) noexcept
+{
+    const double duration = std::max (declickSamples, p.releaseSamples);
+    if (duration <= 0.0)
+    {
+        kill();
+        return;
+    }
+    if (! active || fadingOut) return;
+    gatedAt = p.gateSamples >= 0.0 ? std::min (t, p.gateSamples) : t;
+    release (duration);
+}
+
+double HitVoice::envelopeLevel (double elapsed) const noexcept
+{
+    if (elapsed < p.attackSamples) return elapsed / p.attackSamples;
+    if (const double decayTime = elapsed - p.attackSamples; decayTime < p.decaySamples)
+        return 1.0 - (1.0 - p.sustain) * decayTime / p.decaySamples;
+    return p.sustain;
 }
 
 float HitVoice::read (const float* d, int64_t frames, double x, Interp interp) noexcept
@@ -69,10 +98,10 @@ void HitVoice::render (const SampleView& s, double pitchMul, float& l, float& r)
 {
     if (! active) return;
 
-    // gate end -> start fade-out (or stop hard)
+    // Gate end starts the hit's release stage.
     if (! fadingOut && p.gateSamples >= 0.0 && t >= p.gateSamples)
     {
-        release (p.fadeSamples);
+        gateOff (p.fadeSamples);
         if (! active) return;
     }
 
@@ -91,12 +120,14 @@ void HitVoice::render (const SampleView& s, double pitchMul, float& l, float& r)
         return;
     }
 
-    double env = 1.0;
-    if (p.fadeSamples > 0.0)
+    double env = envelopeLevel (gatedAt >= 0.0 ? gatedAt : t);
+    if (p.fadeSamples > 0.0 || p.releaseSamples > 0.0)
     {
-        if (t < p.fadeSamples)
-            env = 0.5 - 0.5 * std::cos (kPi * t / p.fadeSamples);
         const double remainingOut = speed > 0.0 ? remainingFrames / speed : 1.0e30;
+        if (remainingOut < p.releaseSamples)
+            env *= remainingOut / p.releaseSamples;
+        if (t < p.fadeSamples)
+            env *= 0.5 - 0.5 * std::cos (kPi * t / p.fadeSamples);
         if (remainingOut < p.fadeSamples)
             env *= 0.5 - 0.5 * std::cos (kPi * remainingOut / p.fadeSamples);
     }
@@ -107,7 +138,7 @@ void HitVoice::render (const SampleView& s, double pitchMul, float& l, float& r)
             active = false;
             return;
         }
-        env *= 0.5 + 0.5 * std::cos (kPi * fadeOutT / fadeOutLen);
+        env *= releaseGain();
         fadeOutT += 1.0;
     }
 

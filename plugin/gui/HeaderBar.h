@@ -1,26 +1,23 @@
 #pragma once
+
 #include <juce_gui_basics/juce_gui_basics.h>
 
 class XtoneProcessor;
 
-/// Load / normalise / presets + live rate display.
 class HeaderBar : public juce::Component, private juce::Timer
 {
 public:
-    explicit HeaderBar (XtoneProcessor& p);
-    void resized() override;
+    explicit HeaderBar (XtoneProcessor&);
     void paint (juce::Graphics&) override;
-
-    juce::String buildLiveText() const;
+    void resized() override;
+    juce::Rectangle<int> presetDockBounds() const;
 
 private:
     void timerCallback() override;
-    void refreshPresets();
+    void choosePresetFile (bool saving);
 
     XtoneProcessor& proc;
-    juce::TextButton loadButton { juce::String::fromUTF8 ("Laden…") }, normButton { "Normalisieren" };
-    juce::ComboBox presetBox;
-    juce::TextButton savePresetButton { juce::String::fromUTF8 ("Speichern…") }, loadPresetButton { juce::String::fromUTF8 ("Preset laden…") };
-    juce::Label fileLabel, statusLabel, liveLabel;
+    juce::ComboBox presets;
+    juce::TextButton load { juce::String::fromUTF8 ("Load…") }, save { juce::String::fromUTF8 ("Save…") };
     std::unique_ptr<juce::FileChooser> chooser;
 };
